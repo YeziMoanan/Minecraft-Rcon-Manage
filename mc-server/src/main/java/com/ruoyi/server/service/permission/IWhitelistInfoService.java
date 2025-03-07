@@ -3,6 +3,7 @@ package com.ruoyi.server.service.permission;
 import com.ruoyi.server.domain.permission.WhitelistInfo;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 白名单Service接口
@@ -49,7 +50,7 @@ public interface IWhitelistInfoService {
      * @param whitelistInfo 白名单
      * @return 结果
      */
-    public int updateWhitelistInfo(WhitelistInfo whitelistInfo);
+    public int updateWhitelistInfo(WhitelistInfo whitelistInfo, String user);
 
     /**
      * 批量删除白名单
@@ -67,6 +68,9 @@ public interface IWhitelistInfoService {
      */
     public int deleteWhitelistInfoById(Long id);
 
+
     List<WhitelistInfo> checkRepeat(WhitelistInfo whitelistInfo);
+
+    Map<String, Object> check(Map<String, String> params);
 
 }

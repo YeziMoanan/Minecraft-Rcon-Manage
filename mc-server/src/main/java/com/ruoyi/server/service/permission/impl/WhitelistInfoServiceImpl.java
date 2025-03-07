@@ -1,6 +1,8 @@
 package com.ruoyi.server.service.permission.impl;
 
+import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.common.utils.DateUtils;
+import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.server.async.AsyncManager;
 import com.ruoyi.server.common.EmailTemplates;
 import com.ruoyi.server.common.constant.Command;
@@ -9,19 +11,22 @@ import com.ruoyi.server.common.service.RconService;
 import com.ruoyi.server.domain.permission.BanlistInfo;
 import com.ruoyi.server.domain.permission.WhitelistInfo;
 import com.ruoyi.server.domain.player.PlayerDetails;
+import com.ruoyi.server.domain.server.ServerInfo;
+import com.ruoyi.server.enums.Identity;
 import com.ruoyi.server.mapper.permission.WhitelistInfoMapper;
 import com.ruoyi.server.service.permission.IBanlistInfoService;
 import com.ruoyi.server.service.permission.IWhitelistInfoService;
 import com.ruoyi.server.service.player.IPlayerDetailsService;
+import com.ruoyi.server.service.server.IServerInfoService;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.Nullable;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 
 /**
  * 白名单Service业务层处理
@@ -46,6 +51,9 @@ public class WhitelistInfoServiceImpl implements IWhitelistInfoService {
     private IBanlistInfoService banlistInfoService;
 
     @Autowired
+    private IServerInfoService serverInfoService;
+
+    @Autowired
     private EmailService pushEmail;
 
     @Autowired
@@ -53,6 +61,9 @@ public class WhitelistInfoServiceImpl implements IWhitelistInfoService {
 
     @Autowired
     private IPlayerDetailsService playerDetailsService;
+
+    @Value("${ruoyi.app-url}")
+    private String appUrl;
 
     /**
      * 查询白名单
@@ -132,8 +143,19 @@ public class WhitelistInfoServiceImpl implements IWhitelistInfoService {
      * @return 结果
      */
     @Override
-    public int updateWhitelistInfo(WhitelistInfo whitelistInfo) {
-        String name = SecurityContextHolder.getContext().getAuthentication().getName();
+    public int updateWhitelistInfo(WhitelistInfo whitelistInfo, String user) {
+        String name = null;
+        try {
+            name = SecurityContextHolder.getContext().getAuthentication().getName();
+        } catch (Exception e) {
+            if (name == null) {
+                name = user;
+            }
+        }
+
+        if (name == null && user == null) {
+            log.error("获取用户信息失败,请联系管理员!");
+        }
 
         if (whitelistInfo.getAddState().isEmpty()) {
             return 0;
@@ -431,17 +453,49 @@ public class WhitelistInfoServiceImpl implements IWhitelistInfoService {
 
         try {
             if (flag) {
+                List<Map<String, Object>> data = null;
+                final String servers = whitelistInfo.getServers();
+
+                if (!servers.contains("all")) {
+                    List<Long> ids = new ArrayList<>();
+                    for (String s : servers.split(",")) {
+                        ids.add(Long.parseLong(s));
+                    }
+                    if (ids.size() <= 3) {
+                        final List<ServerInfo> serverInfos = serverInfoService.selectServerInfoByIds(ids);
+
+                        data = new ArrayList<>();
+                        Map<String, Object> map = null;
+                        if (!serverInfos.isEmpty()) {
+                            for (ServerInfo serverInfo : serverInfos) {
+                                map = new HashMap<>();
+                                map.put("name", serverInfo.getNameTag());
+                                map.put("serverAddress", serverInfo.getPlayAddress());
+                                map.put("port", serverInfo.getPlayAddressPort());
+                                map.put("core", serverInfo.getServerCore());
+                                map.put("version", serverInfo.getServerVersion());
+                                data.add(map);
+                            }
+                        }
+                    }
+                }
+
                 pushEmail.push(whitelistInfo.getQqNum().trim() + EmailTemplates.QQ_EMAIL,
                         EmailTemplates.SUCCESS_TITLE,
-                        EmailTemplates.getWhitelistNotification(
-                                whitelistInfo.getQqNum(),
-                                whitelistInfo.getUserName(),
-                                dateFormat.format(whitelistInfo.getTime()),
-                                DateUtils.getTime(),
-                                EmailTemplates.SUCCESS_TITLE)
+                        EmailTemplates.getWhitelistNotification
+                                (
+                                        whitelistInfo.getQqNum(),
+                                        whitelistInfo.getUserName(),
+                                        dateFormat.format(whitelistInfo.getTime()),
+                                        DateUtils.getTime(),
+                                        EmailTemplates.SUCCESS_TITLE,
+                                        appUrl,
+                                        data
+                                )
                 );
             }
         } catch (Exception e) {
+            e.printStackTrace();
             log.error("发送邮件失败,请联系管理员!");
             return 0;
         }
@@ -498,6 +552,124 @@ public class WhitelistInfoServiceImpl implements IWhitelistInfoService {
     @Override
     public List<WhitelistInfo> checkRepeat(WhitelistInfo whitelistInfo) {
         return whitelistInfoMapper.checkRepeat(whitelistInfo);
+    }
+
+    @Override
+    public Map<String, Object> check(Map<String, String> params) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        WhitelistInfo whitelistInfo = new WhitelistInfo();
+        if (params.containsKey("id") && !params.get("id").isEmpty()) {
+            whitelistInfo.setUserName(params.get("id").toLowerCase());
+        }
+        if (params.containsKey("qq") && !params.get("qq").isEmpty()) {
+            whitelistInfo.setQqNum(params.get("qq"));
+        }
+
+        if (!checkRepeat(whitelistInfo).isEmpty()) {
+            List<WhitelistInfo> whitelistInfos = checkRepeat(whitelistInfo);
+            WhitelistInfo obj = whitelistInfos.get(0);
+
+            map.put("游戏ID", obj.getUserName());
+            map.put("QQ号", obj.getQqNum());
+            // map.put("提交时间", dateFormat.format(obj.getAddTime()));  // 容余
+            if (obj.getOnlineFlag() == 1) {
+                map.put("账号类型", "正版");
+            } else {
+                map.put("账号类型", "离线");
+            }
+
+            PlayerDetails playerDetails = new PlayerDetails();
+            playerDetails.setUserName(obj.getUserName().toLowerCase());
+            final List<PlayerDetails> details = playerDetailsService.selectPlayerDetailsList(playerDetails);
+
+            if (!details.isEmpty()) {
+                playerDetails = details.get(0);
+            }
+
+            // if (playerDetails.getProvince() != null) {
+            //     map.put("省份", playerDetails.getProvince());
+            // }
+
+            // 直辖市
+            String[] directCity = {"北京市", "天津市", "上海市", "重庆市"};
+            if (playerDetails.getCity() != null) {
+                if (Arrays.asList(directCity).contains(playerDetails.getCity())) {
+                    map.put("城市", playerDetails.getCity());
+                } else {
+                    map.put("城市", playerDetails.getProvince() + "-" + playerDetails.getCity());
+                }
+            }
+
+
+            if (playerDetails.getIdentity() != null) {
+                String identity;
+                switch (playerDetails.getIdentity()) {
+                    case "player":
+                        identity = Identity.PLAYER.getDesc();
+                        break;
+                    case "operator":
+                        identity = Identity.OPERATOR.getDesc();
+                        break;
+                    case "banned":
+                        identity = Identity.BANNED.getDesc();
+                        break;
+                    default:
+                        identity = Identity.OTHER.getDesc();
+                        break;
+                }
+                map.put("身份", identity);
+            }
+
+            if (playerDetails.getLastOnlineTime() != null && playerDetails.getLastOfflineTime() != null) {
+                // 在线时间和离线时间取最大的
+                map.put("最后上线时间", playerDetails.getLastOnlineTime().getTime()
+                        > playerDetails.getLastOfflineTime().getTime()
+                        ? dateFormat.format(playerDetails.getLastOnlineTime())
+                        : dateFormat.format(playerDetails.getLastOfflineTime()));
+            } else if (playerDetails.getLastOnlineTime() != null) {
+                map.put("最后上线时间", dateFormat.format(playerDetails.getLastOnlineTime()));
+            }
+
+            if (playerDetails.getGameTime() != null) {
+                if (playerDetails.getGameTime() > 60) {
+                    map.put("游戏时间", playerDetails.getGameTime() / 60 + "小时");
+                } else {
+                    map.put("游戏时间", playerDetails.getGameTime() + "分钟");
+                }
+            }
+
+            if (StringUtils.isNotEmpty(playerDetails.getParameters())) {
+                // 取历史名称
+                final JSONObject jsonObject = JSONObject.parseObject(playerDetails.getParameters());
+                if (jsonObject.containsKey("name_history")) {
+                    map.put("历史名称", jsonObject.getJSONArray("name_history"));
+                }
+            }
+
+            map.put("审核人", obj.getReviewUsers());
+            // map.put("UUID", obj.getUserUuid());
+            switch (obj.getAddState()) {
+                case "1":
+                    map.put("审核状态", "已通过");
+                    map.put("审核时间", dateFormat.format(obj.getAddTime()));
+                    break;
+                case "2":
+                    map.put("审核状态", "未通过/已移除");
+                    map.put("移除时间", dateFormat.format(obj.getRemoveTime()));
+                    map.put("移除原因", obj.getRemoveReason());
+                    break;
+                case "9":
+                    map.put("审核状态", "已封禁");
+                    map.put("封禁时间", dateFormat.format(obj.getRemoveTime()));
+                    map.put("封禁原因", obj.getRemoveReason());
+                    break;
+                default:
+                    map.put("审核状态", "待审核");
+                    map.put("UUID", obj.getUserUuid());
+                    break;
+            }
+        }
+        return map;
     }
 
     /**
